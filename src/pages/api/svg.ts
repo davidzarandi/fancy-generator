@@ -2,6 +2,12 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import fs from "fs";
 import path from "path";
 import fetch from "node-fetch";
+import { nanoid } from "nanoid";
+
+import { s3UploadFile } from "@/libs/s3/uploadFile";
+import getBoundingBox from "@/libs/opentype/getBoundingBox";
+import getSVG from "@/libs/opentype/getSVG";
+import getFont from "@/libs/opentype/getFont";
 
 type ApiRequest = NextApiRequest & {
   query: {
@@ -9,36 +15,33 @@ type ApiRequest = NextApiRequest & {
     label: string;
     brandColor?: string;
     textColor?: string;
-    redirect?: string;
   };
 };
 
-const MULTIPLIER = 6.16;
-const TEXT_WIDTH_OFFSET = 29;
+const IMAGE_WIDTH_OFFSET = 2.5;
 const DEFAULT_BRAND_COLOR = "e0234e";
 const DEFAULT_TEXT_COLOR = "f5f5f5";
 
 export default async function handler(req: ApiRequest, res: NextApiResponse) {
   if (!req.query.iconURL) {
-    res.status(400);
-    res.send("iconURL query parameter required!");
+    res.status(400).json({ error: "iconURL query parameter required!" });
     return;
   }
 
   if (!req.query.iconURL) {
-    res.status(400);
-    res.send("label query parameter required!");
+    res.status(400).json({ error: "label query parameter required!" });
     return;
   }
+  // TODO: limit the number of characters to 255
 
   const imageResponse = await fetch(req.query.iconURL);
   if (!imageResponse.ok) {
-    res.status(400);
-    res.send("icon request failed!");
+    console.error("Image fetch failed");
+    res.status(400).json({ error: "icon request failed!" });
     return;
   }
 
-  const templatePath = path.resolve("./public", "template.svg");
+  const templatePath = path.resolve("public", "badge_template.svg");
   let template = fs.readFileSync(templatePath, "utf-8");
 
   const textColor = `#${req.query.textColor ?? DEFAULT_TEXT_COLOR}`;
@@ -48,19 +51,28 @@ export default async function handler(req: ApiRequest, res: NextApiResponse) {
   const imageHash = Buffer.from(imageString).toString("base64");
   template = template.replaceAll("{IMAGE_HASH}", imageHash);
 
-  const label = req.query.label;
-  template = template.replaceAll("{LABEL}", label);
+  const font = getFont();
+  const text = req.query.label;
+  const textSVG = getSVG(text, font);
+  template = template.replaceAll("{TEXT_SVG}", textSVG);
 
-  const textWidth = label.length * MULTIPLIER + TEXT_WIDTH_OFFSET;
-  template = template.replaceAll("{TEXT_WIDTH}", textWidth.toString(10));
+  const imageWidth = getBoundingBox(text, font);
+  template = template.replaceAll("{IMAGE_WIDTH}", (imageWidth.x2 + IMAGE_WIDTH_OFFSET).toString(10));
 
   const brandColor = `#${req.query.brandColor ?? DEFAULT_BRAND_COLOR}`;
   template = template.replaceAll("{BRAND_COLOR}", brandColor);
 
-  const redirect = req.query.redirect ?? "#";
-  template = template.replaceAll("{REDIRECT}", redirect);
+  let fileURL = "";
+  let key = `${nanoid()}.svg`;
+  try {
+    fileURL = await s3UploadFile(key, template, "image/svg+xml");
+  } catch (e) {
+    console.error("S3 file upload failed", e);
+    res
+      .status(500)
+      .json({ error: "Something went wrong with the file upload, please try again later." });
+    return;
+  }
 
-  res.setHeader("Content-Type", "image/svg+xml");
-  res.status(200);
-  res.send(template);
+  res.status(200).json({ fileURL });
 }
